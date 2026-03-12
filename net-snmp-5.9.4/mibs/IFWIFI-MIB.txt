@@ -1,0 +1,402 @@
+IFWIFI-MIB DEFINITIONS ::= BEGIN
+
+-- =============================================================================
+-- IFWIFI-MIB: WiFi Statistics Extension for IF-MIB
+-- Augments IF-MIB::ifTable with IEEE 802.11 wireless statistics
+--
+-- Source tree:  net-snmp V5-9-3-branch
+-- Parent MIB:   IF-MIB (RFC 2863) — ifTable / ifXTable
+-- Standard ref: IEEE 802.11-2020, nl80211 (Linux kernel)
+--
+-- OID placement strategy:
+--   enterprises.99999.wifi (replace 99999 with your IANA PEN)
+--   ifWifiTable AUGMENTS ifEntry → shares same ifIndex row key
+-- =============================================================================
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, Integer32,
+    Counter32, Counter64, Gauge32, enterprises
+        FROM SNMPv2-SMI
+    MODULE-COMPLIANCE, OBJECT-GROUP
+        FROM SNMPv2-CONF
+    TruthValue, DisplayString, PhysAddress
+        FROM SNMPv2-TC
+    ifIndex
+        FROM IF-MIB;
+
+ifWifiMIB MODULE-IDENTITY
+    LAST-UPDATED "202503110000Z"
+    ORGANIZATION "Your Organization"
+    CONTACT-INFO "your-email@example.com"
+    DESCRIPTION
+        "MIB module extending IF-MIB with IEEE 802.11
+         wireless interface statistics. Reads from:
+           - /proc/net/wireless  (signal, noise, rate)
+           - nl80211 via iw tool (station info)
+           - sysfs /sys/class/net/<iface>/statistics
+         AUGMENTS ifTable: one row per wireless ifIndex."
+    REVISION "202503110000Z"
+    DESCRIPTION "Initial version."
+    ::= { enterprises 99999 10 }   -- replace 99999 with real IANA PEN
+
+-- =============================================================================
+-- Object groups
+-- =============================================================================
+
+ifWifiObjects      OBJECT IDENTIFIER ::= { ifWifiMIB 1 }
+ifWifiConformance  OBJECT IDENTIFIER ::= { ifWifiMIB 2 }
+
+-- =============================================================================
+-- ifWifiTable — AUGMENTS IF-MIB::ifTable
+-- Indexed by ifIndex (inherited from parent table)
+-- =============================================================================
+
+ifWifiTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF IfWifiEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION
+        "A table of WiFi statistics, one row per wireless
+         interface. This table AUGMENTS ifTable, meaning
+         every row here has the same ifIndex as the parent
+         ifTable row."
+    ::= { ifWifiObjects 1 }
+
+ifWifiEntry OBJECT-TYPE
+    SYNTAX      IfWifiEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION "WiFi statistics for one wireless interface."
+    AUGMENTS    { ifEntry }     -- same index: ifIndex
+    ::= { ifWifiTable 1 }
+
+IfWifiEntry ::= SEQUENCE {
+    -- ── Radio / PHY layer ─────────────────────────────────────
+    ifWifiSSID              DisplayString,
+    ifWifiBSSID             PhysAddress,
+    ifWifiChannel           Integer32,
+    ifWifiChannelWidth      Integer32,
+    ifWifiBand              INTEGER,
+    ifWifiStandard          INTEGER,
+
+    -- ── Signal quality ────────────────────────────────────────
+    ifWifiSignalDBm         Integer32,
+    ifWifiNoiseDBm          Integer32,
+    ifWifiSNR               Integer32,
+    ifWifiLinkQuality       Gauge32,
+    ifWifiLinkQualityMax    Gauge32,
+
+    -- ── Rate / throughput ─────────────────────────────────────
+    ifWifiTxBitRate         Gauge32,
+    ifWifiRxBitRate         Gauge32,
+    ifWifiTxMCS             Integer32,
+    ifWifiRxMCS             Integer32,
+
+    -- ── Packet counters (from nl80211 / iw station dump) ──────
+    ifWifiTxPackets         Counter64,
+    ifWifiRxPackets         Counter64,
+    ifWifiTxBytes           Counter64,
+    ifWifiRxBytes           Counter64,
+    ifWifiTxRetries         Counter32,
+    ifWifiTxFailed          Counter32,
+    ifWifiRxDropMisc        Counter32,
+    ifWifiBeaconLoss        Counter32,
+
+    -- ── Association state ─────────────────────────────────────
+    ifWifiConnected         TruthValue,
+    ifWifiAuthAlg           INTEGER,
+    ifWifiPairwiseCipher    DisplayString,
+    ifWifiGroupCipher       DisplayString
+}
+
+-- ── Radio / PHY ────────────────────────────────────────────────────────────
+
+ifWifiSSID OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..32))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "SSID of the associated BSS. Empty if not associated.
+                 Source: iw dev <iface> link | grep SSID"
+    ::= { ifWifiEntry 1 }
+
+ifWifiBSSID OBJECT-TYPE
+    SYNTAX      PhysAddress
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "BSSID (MAC) of the access point. All zeros if not associated.
+                 Source: iw dev <iface> link | grep Connected"
+    ::= { ifWifiEntry 2 }
+
+ifWifiChannel OBJECT-TYPE
+    SYNTAX      Integer32 (0..196)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current operating channel number (1-14 for 2.4GHz,
+                 36-196 for 5GHz, 1-233 for 6GHz). 0 = not associated.
+                 Source: iw dev <iface> info | grep channel"
+    ::= { ifWifiEntry 3 }
+
+ifWifiChannelWidth OBJECT-TYPE
+    SYNTAX      Integer32 (0..320)
+    UNITS       "MHz"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Channel bandwidth in MHz: 20, 40, 80, 160, 320.
+                 Source: iw dev <iface> info | grep width"
+    ::= { ifWifiEntry 4 }
+
+ifWifiBand OBJECT-TYPE
+    SYNTAX      INTEGER {
+                    unknown(0),
+                    band2dot4GHz(1),
+                    band5GHz(2),
+                    band6GHz(3),
+                    band60GHz(4)
+                }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Frequency band of current association."
+    ::= { ifWifiEntry 5 }
+
+ifWifiStandard OBJECT-TYPE
+    SYNTAX      INTEGER {
+                    unknown(0),
+                    dot11b(1),
+                    dot11g(2),
+                    dot11a(3),
+                    dot11n(4),    -- HT  (802.11n  / WiFi 4)
+                    dot11ac(5),   -- VHT (802.11ac / WiFi 5)
+                    dot11ax(6),   -- HE  (802.11ax / WiFi 6/6E)
+                    dot11be(7)    -- EHT (802.11be / WiFi 7)
+                }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "IEEE 802.11 PHY standard in use."
+    ::= { ifWifiEntry 6 }
+
+-- ── Signal quality ─────────────────────────────────────────────────────────
+
+ifWifiSignalDBm OBJECT-TYPE
+    SYNTAX      Integer32 (-120..0)
+    UNITS       "dBm"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Received signal strength in dBm. Typical range:
+                 -30 (excellent) to -90 (weak). 0 = not associated.
+                 Source: /proc/net/wireless column 3, or
+                         iw dev <iface> link | grep signal"
+    ::= { ifWifiEntry 7 }
+
+ifWifiNoiseDBm OBJECT-TYPE
+    SYNTAX      Integer32 (-120..0)
+    UNITS       "dBm"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Noise floor in dBm. Typically around -95 dBm.
+                 Source: /proc/net/wireless column 4"
+    ::= { ifWifiEntry 8 }
+
+ifWifiSNR OBJECT-TYPE
+    SYNTAX      Integer32 (0..120)
+    UNITS       "dB"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Signal-to-Noise Ratio = Signal - Noise (dBm).
+                 Computed: ifWifiSignalDBm - ifWifiNoiseDBm"
+    ::= { ifWifiEntry 9 }
+
+ifWifiLinkQuality OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Link quality value as reported by the driver.
+                 Interpret as ifWifiLinkQuality / ifWifiLinkQualityMax.
+                 Source: /proc/net/wireless column 2 (left value)"
+    ::= { ifWifiEntry 10 }
+
+ifWifiLinkQualityMax OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Maximum possible link quality for this driver.
+                 Source: /proc/net/wireless column 2 (right value)"
+    ::= { ifWifiEntry 11 }
+
+-- ── Rate ───────────────────────────────────────────────────────────────────
+
+ifWifiTxBitRate OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "100 bps"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current transmit bit rate in units of 100 bps.
+                 Example: 54 Mbps = 540000.
+                 Source: iw dev <iface> link | grep tx bitrate"
+    ::= { ifWifiEntry 12 }
+
+ifWifiRxBitRate OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "100 bps"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Current receive bit rate in units of 100 bps.
+                 Source: iw dev <iface> link | grep rx bitrate"
+    ::= { ifWifiEntry 13 }
+
+ifWifiTxMCS OBJECT-TYPE
+    SYNTAX      Integer32 (-1..11)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "MCS index for transmit path. -1 = not applicable
+                 (legacy rate). 0-7 for HT, 0-9 for VHT/HE."
+    ::= { ifWifiEntry 14 }
+
+ifWifiRxMCS OBJECT-TYPE
+    SYNTAX      Integer32 (-1..11)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "MCS index for receive path. -1 = not applicable."
+    ::= { ifWifiEntry 15 }
+
+-- ── Packet counters ────────────────────────────────────────────────────────
+
+ifWifiTxPackets OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total transmitted MSDU packets.
+                 Source: iw dev <iface> station dump | grep tx packets"
+    ::= { ifWifiEntry 16 }
+
+ifWifiRxPackets OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total received MSDU packets.
+                 Source: iw dev <iface> station dump | grep rx packets"
+    ::= { ifWifiEntry 17 }
+
+ifWifiTxBytes OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total transmitted bytes at 802.11 MSDU level.
+                 Source: iw dev <iface> station dump | grep tx bytes"
+    ::= { ifWifiEntry 18 }
+
+ifWifiRxBytes OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total received bytes at 802.11 MSDU level.
+                 Source: iw dev <iface> station dump | grep rx bytes"
+    ::= { ifWifiEntry 19 }
+
+ifWifiTxRetries OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total MPDU transmit retries.
+                 Source: iw dev <iface> station dump | grep tx retries"
+    ::= { ifWifiEntry 20 }
+
+ifWifiTxFailed OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Total MPDU transmit failures (all retries exhausted).
+                 Source: iw dev <iface> station dump | grep tx failed"
+    ::= { ifWifiEntry 21 }
+
+ifWifiRxDropMisc OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Received frames dropped for misc reasons (bad FCS etc).
+                 Source: iw dev <iface> station dump | grep rx drop misc"
+    ::= { ifWifiEntry 22 }
+
+ifWifiBeaconLoss OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Number of beacon loss events detected by the driver.
+                 Source: iw dev <iface> station dump | grep beacon loss"
+    ::= { ifWifiEntry 23 }
+
+-- ── Association state ──────────────────────────────────────────────────────
+
+ifWifiConnected OBJECT-TYPE
+    SYNTAX      TruthValue
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "True(1) if associated with an AP, false(2) otherwise."
+    ::= { ifWifiEntry 24 }
+
+ifWifiAuthAlg OBJECT-TYPE
+    SYNTAX      INTEGER {
+                    none(0),
+                    open(1),
+                    wpa2Personal(2),
+                    wpa2Enterprise(3),
+                    wpa3Personal(4),
+                    wpa3Enterprise(5)
+                }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Authentication algorithm in use.
+                 Source: iw dev <iface> link | grep capability"
+    ::= { ifWifiEntry 25 }
+
+ifWifiPairwiseCipher OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..16))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Pairwise (unicast) cipher suite. E.g. CCMP, TKIP, GCMP.
+                 Source: iw dev <iface> link"
+    ::= { ifWifiEntry 26 }
+
+ifWifiGroupCipher OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..16))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "Group (broadcast/multicast) cipher suite.
+                 Source: iw dev <iface> link"
+    ::= { ifWifiEntry 27 }
+
+-- =============================================================================
+-- Conformance
+-- =============================================================================
+
+ifWifiCompliances  OBJECT IDENTIFIER ::= { ifWifiConformance 1 }
+ifWifiGroups       OBJECT IDENTIFIER ::= { ifWifiConformance 2 }
+
+ifWifiCompliance MODULE-COMPLIANCE
+    STATUS  current
+    DESCRIPTION "Compliance for WiFi MIB."
+    MODULE
+        MANDATORY-GROUPS { ifWifiRadioGroup, ifWifiStatsGroup }
+    ::= { ifWifiCompliances 1 }
+
+ifWifiRadioGroup OBJECT-GROUP
+    OBJECTS {
+        ifWifiSSID, ifWifiBSSID, ifWifiChannel, ifWifiChannelWidth,
+        ifWifiBand, ifWifiStandard, ifWifiSignalDBm, ifWifiNoiseDBm,
+        ifWifiSNR, ifWifiLinkQuality, ifWifiLinkQualityMax,
+        ifWifiTxBitRate, ifWifiRxBitRate, ifWifiTxMCS, ifWifiRxMCS,
+        ifWifiConnected, ifWifiAuthAlg, ifWifiPairwiseCipher, ifWifiGroupCipher
+    }
+    STATUS  current
+    DESCRIPTION "Radio and PHY layer WiFi objects."
+    ::= { ifWifiGroups 1 }
+
+ifWifiStatsGroup OBJECT-GROUP
+    OBJECTS {
+        ifWifiTxPackets, ifWifiRxPackets, ifWifiTxBytes, ifWifiRxBytes,
+        ifWifiTxRetries, ifWifiTxFailed, ifWifiRxDropMisc, ifWifiBeaconLoss
+    }
+    STATUS  current
+    DESCRIPTION "WiFi packet and byte counter objects."
+    ::= { ifWifiGroups 2 }
+
+END
