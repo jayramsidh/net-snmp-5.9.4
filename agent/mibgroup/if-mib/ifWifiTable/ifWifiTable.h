@@ -4,51 +4,19 @@
  * WiFi statistics extension for IF-MIB::ifTable
  * Net-SNMP 5.9.4 / OpenWrt 24.10 aarch64 musl-libc
  *
- * ══════════════════════════════════════════════════════════════
- * LINKER ERROR FIX — "undefined reference to ifWifi_get_by_ifindex"
- *
- * Root cause:
- *   net-snmp's build system only compiles the .c file whose name
- *   matches the module name given to --with-mib-modules.
- *   So only ifWifiTable.c was compiled; ifWifiTable_data_access.c
- *   was silently skipped → all symbols from it were undefined at link.
- *
- * Fix:
- *   config_require() below tells net-snmp's configure script to
- *   register ifWifiTable_data_access.c as an additional source file
- *   for this module. The macro MUST be at file scope (not inside a
- *   comment or #if block) so the raw-text scanner in configure finds it.
- *
- *   Canonical reference — net-snmp's own if-mib/ifTable/ifTable.h:
- *     config_require(if-mib/ifTable/ifTable_data_access)
- *     config_require(if-mib/ifTable/ifTable_interface)
- *
- * ══════════════════════════════════════════════════════════════
- * COMPILE ERROR FIX — "IFNAMSIZ undeclared here (not in a function)"
- *
- * Root cause:
- *   mib_module_includes.h includes this header at file scope in
- *   agent_read_config.c before any function body. IFNAMSIZ (<net/if.h>),
- *   time_t (<time.h>), and uint64_t (<stdint.h>) must be pulled in
- *   by THIS header — they cannot rely on the .c file's includes.
- * ══════════════════════════════════════════════════════════════
+ * These macros must remain at file scope so Net-SNMP's configure
+ * scanner can detect them.
  */
 
-/*
- * config_require — MUST be outside #ifndef guard so net-snmp's
- * configure scanner (a raw grep) always finds it.
- *
- * Tells the build system: also compile ifWifiTable_data_access.c
- */
+config_add_mib(IFWIFI-MIB)
 config_require(if-mib/ifWifiTable/ifWifiTable_data_access)
 
 #ifndef IFWIFITABLE_H
 #define IFWIFITABLE_H
 
-/* ── System headers required at file scope ────────────────────────────── */
-#include <net/if.h>     /* IFNAMSIZ — Linux network interface name size */
-#include <time.h>       /* time_t   — last_updated field in struct      */
-#include <stdint.h>     /* uint32_t, uint64_t — portable counter types  */
+#include <net/if.h>
+#include <time.h>
+#include <stdint.h>
 
 /* ── Column OID numbers (relative to ifWifiEntry) ─────────────────────── */
 #define COLUMN_IFWIFISSID               1
@@ -75,7 +43,7 @@ config_require(if-mib/ifWifiTable/ifWifiTable_data_access)
 #define COLUMN_IFWIFIRXDROPMISC         22
 #define COLUMN_IFWIFIBEACONLOSS         23
 #define COLUMN_IFWIFICONNECTED          24
-#define COLUMN_IFWIFIAAUTHALG           25
+#define COLUMN_IFWIFIAUTHALG            25
 #define COLUMN_IFWIFIPAIRWISECIPHER     26
 #define COLUMN_IFWIFIGROUPCIPHER        27
 
@@ -91,10 +59,10 @@ config_require(if-mib/ifWifiTable/ifWifiTable_data_access)
 #define IFWIFI_STD_B                    1
 #define IFWIFI_STD_G                    2
 #define IFWIFI_STD_A                    3
-#define IFWIFI_STD_N                    4   /* WiFi 4  HT   */
-#define IFWIFI_STD_AC                   5   /* WiFi 5  VHT  */
-#define IFWIFI_STD_AX                   6   /* WiFi 6  HE   */
-#define IFWIFI_STD_BE                   7   /* WiFi 7  EHT  */
+#define IFWIFI_STD_N                    4
+#define IFWIFI_STD_AC                   5
+#define IFWIFI_STD_AX                   6
+#define IFWIFI_STD_BE                   7
 
 /* ── Authentication algorithm enumeration values ───────────────────────── */
 #define IFWIFI_AUTH_NONE                0
@@ -105,30 +73,25 @@ config_require(if-mib/ifWifiTable/ifWifiTable_data_access)
 #define IFWIFI_AUTH_WPA3_ENTERPRISE     5
 
 /* ── Cache TTL ─────────────────────────────────────────────────────────── */
-#define IFWIFI_CACHE_TIMEOUT            15  /* seconds between iw calls */
+#define IFWIFI_CACHE_TIMEOUT            15
 
 /*
  * ifWifiData — one cached row per wireless interface
  *
  * Row key: ifIndex — same as IF-MIB::ifTable (AUGMENTS ifEntry)
- *
- * uint64_t for Counter64 MIB objects  (avoids 'unsigned long long' warnings)
- * uint32_t for Counter32/Gauge32      (32-bit on all platforms)
- * IFNAMSIZ from <net/if.h>            (always 16 on Linux)
  */
 typedef struct ifWifiData_s {
-
     /* identity */
     long            ifIndex;
     char            ifName[IFNAMSIZ];
 
     /* radio / PHY */
-    char            ssid[33];           /* max 32 chars + NUL */
+    char            ssid[33];
     unsigned char   bssid[6];
     int             channel;
     int             channel_width_mhz;
-    int             band;               /* IFWIFI_BAND_* */
-    int             standard;           /* IFWIFI_STD_*  */
+    int             band;
+    int             standard;
 
     /* signal quality */
     int             signal_dbm;
@@ -140,7 +103,7 @@ typedef struct ifWifiData_s {
     /* bit rates — Gauge32, units: 100 bps */
     uint32_t        tx_bitrate_100bps;
     uint32_t        rx_bitrate_100bps;
-    int             tx_mcs;             /* -1 = legacy (non-HT) rate */
+    int             tx_mcs;     /* -1 = legacy */
     int             rx_mcs;
 
     /* packet/byte counters — Counter64 */
@@ -156,17 +119,16 @@ typedef struct ifWifiData_s {
     uint32_t        beacon_loss;
 
     /* association state */
-    int             connected;          /* 1=true, 2=false (TruthValue) */
-    int             auth_alg;           /* IFWIFI_AUTH_* */
+    int             connected;  /* TruthValue: 1=true, 2=false */
+    int             auth_alg;   /* IFWIFI_AUTH_* */
     char            pairwise_cipher[17];
     char            group_cipher[17];
 
     /* internal */
     time_t          last_updated;
-
 } ifWifiData;
 
-/* ── Public API (implemented in ifWifiTable_data_access.c) ────────────── */
+/* ── Public API ────────────────────────────────────────────────────────── */
 void        init_ifWifiTable(void);
 void        shutdown_ifWifiTable(void);
 int         ifWifi_load_data(void);
