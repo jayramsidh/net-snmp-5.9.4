@@ -4,10 +4,10 @@
  * SNMP agent handler for IFWIFI-MIB::ifWifiTable
  * Net-SNMP 5.9.4 / OpenWrt 24.10 compatible
  *
- * Supports:
- *   - GET
- *   - GETNEXT
- *   - GETBULK (through GETNEXT path)
+ * Uses Net-SNMP table iterator helper so:
+ *   - snmpget works
+ *   - snmpwalk on IFWIFI subtree works
+ *   - global snmpwalk .1 can discover the subtree correctly
  *
  * OID structure:
  *   enterprises.99999.10.1.1.1.<column>.<ifIndex>
@@ -18,50 +18,15 @@
 #include <net-snmp/agent/net-snmp-agent-includes.h>
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "ifWifiTable.h"
 
 /* enterprises.99999.10.1.1 */
-static oid    ifWifiTable_oid[]   = { 1,3,6,1,4,1,99999,10,1,1 };
-static size_t ifWifiTable_oid_len = OID_LENGTH(ifWifiTable_oid);
+static oid ifWifiTable_oid[] = { 1,3,6,1,4,1,99999,10,1,1 };
 
-/*
- * Maximum ifIndex to scan while resolving GETNEXT.
- * This is pragmatic and works well on embedded/OpenWrt systems.
- */
-#define IFWIFI_MAX_IFINDEX_SCAN 4096
-
-static const long ifWifi_columns[] = {
-    COLUMN_IFWIFISSID,
-    COLUMN_IFWIFIBSSID,
-    COLUMN_IFWIFICHANNEL,
-    COLUMN_IFWIFICHANNELWIDTH,
-    COLUMN_IFWIFIBAND,
-    COLUMN_IFWIFISTANDARD,
-    COLUMN_IFWIFISIGNALDBM,
-    COLUMN_IFWIFINOISEDMB,
-    COLUMN_IFWIFISNR,
-    COLUMN_IFWIFILINKQUALITY,
-    COLUMN_IFWIFILINKQUALITYMAX,
-    COLUMN_IFWIFITXBITRATE,
-    COLUMN_IFWIFIRXBITRATE,
-    COLUMN_IFWIFITXMCS,
-    COLUMN_IFWIFIRXMCS,
-    COLUMN_IFWIFITXPACKETS,
-    COLUMN_IFWIFIRXPACKETS,
-    COLUMN_IFWIFITXBYTES,
-    COLUMN_IFWIFIRXBYTES,
-    COLUMN_IFWIFITXRETRIES,
-    COLUMN_IFWIFITXFAILED,
-    COLUMN_IFWIFIRXDROPMISC,
-    COLUMN_IFWIFIBEACONLOSS,
-    COLUMN_IFWIFICONNECTED,
-    COLUMN_IFWIFIAUTHALG,
-    COLUMN_IFWIFIPAIRWISECIPHER,
-    COLUMN_IFWIFIGROUPCIPHER
-};
-
-#define IFWIFI_NUM_COLUMNS (sizeof(ifWifi_columns) / sizeof(ifWifi_columns[0]))
+static netsnmp_table_registration_info *ifWifiTable_info = NULL;
+static netsnmp_iterator_info           *ifWifiTable_iinfo = NULL;
 
 /* -------------------------------------------------------------------------- */
 /* Counter64 helper                                                            */
@@ -78,10 +43,10 @@ set_counter64(netsnmp_variable_list *var, uint64_t val)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Fill one instance value                                                     */
+/* Return one column value                                                     */
 /* -------------------------------------------------------------------------- */
 static int
-ifWifi_fill_value(netsnmp_variable_list *var, long column, const ifWifiData *d)
+ifWifi_set_var(netsnmp_variable_list *var, long column, const ifWifiData *d)
 {
     uint32_t u32;
 
@@ -89,18 +54,6 @@ ifWifi_fill_value(netsnmp_variable_list *var, long column, const ifWifiData *d)
     case COLUMN_IFWIFISSID:
         snmp_set_var_typed_value(var, ASN_OCTET_STR,
                                  (const u_char *)d->ssid, strlen(d->ssid));
-        return SNMP_ERR_NOERROR;
-
-    case COLUMN_IFWIFIPAIRWISECIPHER:
-        snmp_set_var_typed_value(var, ASN_OCTET_STR,
-                                 (const u_char *)d->pairwise_cipher,
-                                 strlen(d->pairwise_cipher));
-        return SNMP_ERR_NOERROR;
-
-    case COLUMN_IFWIFIGROUPCIPHER:
-        snmp_set_var_typed_value(var, ASN_OCTET_STR,
-                                 (const u_char *)d->group_cipher,
-                                 strlen(d->group_cipher));
         return SNMP_ERR_NOERROR;
 
     case COLUMN_IFWIFIBSSID:
@@ -135,20 +88,16 @@ ifWifi_fill_value(netsnmp_variable_list *var, long column, const ifWifiData *d)
         snmp_set_var_typed_integer(var, ASN_INTEGER, d->snr_db);
         return SNMP_ERR_NOERROR;
 
-    case COLUMN_IFWIFITXMCS:
-        snmp_set_var_typed_integer(var, ASN_INTEGER, d->tx_mcs);
+    case COLUMN_IFWIFILINKQUALITY:
+        u32 = d->link_quality;
+        snmp_set_var_typed_value(var, ASN_GAUGE,
+                                 (const u_char *)&u32, sizeof(u32));
         return SNMP_ERR_NOERROR;
 
-    case COLUMN_IFWIFIRXMCS:
-        snmp_set_var_typed_integer(var, ASN_INTEGER, d->rx_mcs);
-        return SNMP_ERR_NOERROR;
-
-    case COLUMN_IFWIFICONNECTED:
-        snmp_set_var_typed_integer(var, ASN_INTEGER, d->connected);
-        return SNMP_ERR_NOERROR;
-
-    case COLUMN_IFWIFIAUTHALG:
-        snmp_set_var_typed_integer(var, ASN_INTEGER, d->auth_alg);
+    case COLUMN_IFWIFILINKQUALITYMAX:
+        u32 = d->link_quality_max;
+        snmp_set_var_typed_value(var, ASN_GAUGE,
+                                 (const u_char *)&u32, sizeof(u32));
         return SNMP_ERR_NOERROR;
 
     case COLUMN_IFWIFITXBITRATE:
@@ -163,16 +112,12 @@ ifWifi_fill_value(netsnmp_variable_list *var, long column, const ifWifiData *d)
                                  (const u_char *)&u32, sizeof(u32));
         return SNMP_ERR_NOERROR;
 
-    case COLUMN_IFWIFILINKQUALITY:
-        u32 = d->link_quality;
-        snmp_set_var_typed_value(var, ASN_GAUGE,
-                                 (const u_char *)&u32, sizeof(u32));
+    case COLUMN_IFWIFITXMCS:
+        snmp_set_var_typed_integer(var, ASN_INTEGER, d->tx_mcs);
         return SNMP_ERR_NOERROR;
 
-    case COLUMN_IFWIFILINKQUALITYMAX:
-        u32 = d->link_quality_max;
-        snmp_set_var_typed_value(var, ASN_GAUGE,
-                                 (const u_char *)&u32, sizeof(u32));
+    case COLUMN_IFWIFIRXMCS:
+        snmp_set_var_typed_integer(var, ASN_INTEGER, d->rx_mcs);
         return SNMP_ERR_NOERROR;
 
     case COLUMN_IFWIFITXPACKETS:
@@ -215,89 +160,107 @@ ifWifi_fill_value(netsnmp_variable_list *var, long column, const ifWifiData *d)
                                  (const u_char *)&u32, sizeof(u32));
         return SNMP_ERR_NOERROR;
 
+    case COLUMN_IFWIFICONNECTED:
+        snmp_set_var_typed_integer(var, ASN_INTEGER, d->connected);
+        return SNMP_ERR_NOERROR;
+
+    case COLUMN_IFWIFIAUTHALG:
+        snmp_set_var_typed_integer(var, ASN_INTEGER, d->auth_alg);
+        return SNMP_ERR_NOERROR;
+
+    case COLUMN_IFWIFIPAIRWISECIPHER:
+        snmp_set_var_typed_value(var, ASN_OCTET_STR,
+                                 (const u_char *)d->pairwise_cipher,
+                                 strlen(d->pairwise_cipher));
+        return SNMP_ERR_NOERROR;
+
+    case COLUMN_IFWIFIGROUPCIPHER:
+        snmp_set_var_typed_value(var, ASN_OCTET_STR,
+                                 (const u_char *)d->group_cipher,
+                                 strlen(d->group_cipher));
+        return SNMP_ERR_NOERROR;
+
     default:
         return SNMP_NOSUCHOBJECT;
     }
 }
 
 /* -------------------------------------------------------------------------- */
-/* Resolve exact request                                                       */
+/* Iterator context                                                            */
 /* -------------------------------------------------------------------------- */
-static int
-ifWifi_resolve_exact(const oid *name, size_t name_len, long *column, long *ifIndex)
+
+typedef struct ifWifiIterContext_s {
+    long current_ifindex;
+} ifWifiIterContext;
+
+/* Return first valid row */
+static netsnmp_variable_list *
+ifWifiTable_get_first_data_point(void **loop_context,
+                                 void **data_context,
+                                 netsnmp_variable_list *index_data,
+                                 netsnmp_iterator_info *data)
 {
-    const oid *suffix;
-    size_t suffix_len;
+    long idx;
+    ifWifiData *d;
+    ifWifiIterContext *ctx;
 
-    if (name_len < ifWifiTable_oid_len)
-        return 0;
+    (void)data;
 
-    if (snmp_oid_compare(name, ifWifiTable_oid_len,
-                         ifWifiTable_oid, ifWifiTable_oid_len) != 0)
-        return 0;
+    ifWifi_load_data();
 
-    suffix = name + ifWifiTable_oid_len;
-    suffix_len = name_len - ifWifiTable_oid_len;
+    ctx = SNMP_MALLOC_TYPEDEF(ifWifiIterContext);
+    if (!ctx)
+        return NULL;
 
-    /* Expect .1.<column>.<ifIndex> */
-    if (suffix_len != 3 || suffix[0] != 1)
-        return 0;
-
-    *column  = (long)suffix[1];
-    *ifIndex = (long)suffix[2];
-    return 1;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Find next valid instance for GETNEXT / GETBULK                              */
-/* -------------------------------------------------------------------------- */
-static int
-ifWifi_find_next(const oid *req_oid, size_t req_oid_len,
-                 oid *best_oid, size_t *best_oid_len,
-                 long *best_col, long *best_ifindex, ifWifiData **best_data)
-{
-    size_t i;
-    int found = 0;
-
-    for (i = 0; i < IFWIFI_NUM_COLUMNS; i++) {
-        long col = ifWifi_columns[i];
-        long idx;
-
-        for (idx = 1; idx <= IFWIFI_MAX_IFINDEX_SCAN; idx++) {
-            ifWifiData *d;
-            oid cand[128];
-            size_t cand_len = 0;
-
-            d = ifWifi_get_by_ifindex(idx);
-            if (!d)
-                continue;
-
-            memcpy(cand, ifWifiTable_oid, ifWifiTable_oid_len * sizeof(oid));
-            cand_len = ifWifiTable_oid_len;
-            cand[cand_len++] = 1;        /* ifWifiEntry */
-            cand[cand_len++] = (oid)col; /* column */
-            cand[cand_len++] = (oid)idx; /* ifIndex */
-
-            if (snmp_oid_compare(cand, cand_len, req_oid, req_oid_len) <= 0)
-                continue;
-
-            if (!found ||
-                snmp_oid_compare(cand, cand_len, best_oid, *best_oid_len) < 0) {
-                memcpy(best_oid, cand, cand_len * sizeof(oid));
-                *best_oid_len = cand_len;
-                *best_col = col;
-                *best_ifindex = idx;
-                *best_data = d;
-                found = 1;
-            }
+    for (idx = 1; idx <= 4096; idx++) {
+        d = ifWifi_get_by_ifindex(idx);
+        if (d) {
+            ctx->current_ifindex = idx;
+            *loop_context = ctx;
+            *data_context = d;
+            snmp_set_var_typed_integer(index_data, ASN_INTEGER, idx);
+            return index_data;
         }
     }
 
-    return found;
+    free(ctx);
+    return NULL;
+}
+
+/* Return next valid row */
+static netsnmp_variable_list *
+ifWifiTable_get_next_data_point(void **loop_context,
+                                void **data_context,
+                                netsnmp_variable_list *index_data,
+                                netsnmp_iterator_info *data)
+{
+    ifWifiIterContext *ctx = (ifWifiIterContext *)(*loop_context);
+    long idx;
+    ifWifiData *d;
+
+    (void)data;
+
+    if (!ctx)
+        return NULL;
+
+    for (idx = ctx->current_ifindex + 1; idx <= 4096; idx++) {
+        d = ifWifi_get_by_ifindex(idx);
+        if (d) {
+            ctx->current_ifindex = idx;
+            *data_context = d;
+            snmp_set_var_typed_integer(index_data, ASN_INTEGER, idx);
+            return index_data;
+        }
+    }
+
+    free(ctx);
+    *loop_context = NULL;
+    *data_context = NULL;
+    return NULL;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Main handler                                                                */
+/* Main table handler                                                          */
 /* -------------------------------------------------------------------------- */
 static int
 ifWifiTable_handler(netsnmp_mib_handler          *handler,
@@ -305,67 +268,35 @@ ifWifiTable_handler(netsnmp_mib_handler          *handler,
                     netsnmp_agent_request_info   *reqinfo,
                     netsnmp_request_info         *requests)
 {
-    netsnmp_request_info *request;
+    netsnmp_request_info       *request;
+    netsnmp_table_request_info *table_info;
 
     (void)handler;
     (void)reginfo;
 
-    for (request = requests; request; request = request->next) {
-        netsnmp_variable_list *var = request->requestvb;
+    switch (reqinfo->mode) {
+    case MODE_GET:
+        for (request = requests; request; request = request->next) {
+            ifWifiData *d = (ifWifiData *)netsnmp_extract_iterator_context(request);
+            table_info = netsnmp_extract_table_info(request);
 
-        if (request->processed)
-            continue;
-
-        switch (reqinfo->mode) {
-
-        case MODE_GET: {
-            long column, ifIndex;
-            ifWifiData *d;
-
-            if (!ifWifi_resolve_exact(var->name, var->name_length,
-                                      &column, &ifIndex)) {
-                netsnmp_set_request_error(reqinfo, request, SNMP_NOSUCHOBJECT);
-                continue;
-            }
-
-            d = ifWifi_get_by_ifindex(ifIndex);
-            if (!d) {
+            if (!d || !table_info) {
                 netsnmp_set_request_error(reqinfo, request, SNMP_NOSUCHINSTANCE);
                 continue;
             }
 
-            if (ifWifi_fill_value(var, column, d) != SNMP_ERR_NOERROR) {
+            if (ifWifi_set_var(request->requestvb, table_info->colnum, d)
+                != SNMP_ERR_NOERROR) {
                 netsnmp_set_request_error(reqinfo, request, SNMP_NOSUCHOBJECT);
             }
-            break;
         }
+        break;
 
-        case MODE_GETNEXT:
-        case MODE_GETBULK: {
-            oid next_oid[128];
-            size_t next_oid_len = 0;
-            long next_col = 0, next_ifindex = 0;
-            ifWifiData *next_data = NULL;
-
-            if (!ifWifi_find_next(var->name, var->name_length,
-                                  next_oid, &next_oid_len,
-                                  &next_col, &next_ifindex, &next_data)) {
-                netsnmp_set_request_error(reqinfo, request, SNMP_NOSUCHOBJECT);
-                continue;
-            }
-
-            snmp_set_var_objid(var, next_oid, next_oid_len);
-
-            if (ifWifi_fill_value(var, next_col, next_data) != SNMP_ERR_NOERROR) {
-                netsnmp_set_request_error(reqinfo, request, SNMP_NOSUCHOBJECT);
-            }
-            break;
-        }
-
-        default:
+    default:
+        for (request = requests; request; request = request->next) {
             netsnmp_set_request_error(reqinfo, request, SNMP_ERR_NOTWRITABLE);
-            break;
         }
+        break;
     }
 
     return SNMP_ERR_NOERROR;
@@ -379,22 +310,39 @@ init_ifWifiTable(void)
 {
     netsnmp_handler_registration *reg;
 
-    DEBUGMSGTL(("ifWifi", "init_ifWifiTable: registering OID subtree\n"));
+    DEBUGMSGTL(("ifWifi", "init_ifWifiTable: registering iterator table\n"));
 
     reg = netsnmp_create_handler_registration(
-              "ifWifiTable",
-              ifWifiTable_handler,
-              ifWifiTable_oid,
-              ifWifiTable_oid_len,
-              HANDLER_CAN_RONLY);
+        "ifWifiTable",
+        ifWifiTable_handler,
+        ifWifiTable_oid,
+        OID_LENGTH(ifWifiTable_oid),
+        HANDLER_CAN_RONLY
+    );
 
     if (!reg) {
         snmp_log(LOG_ERR, "ifWifiTable: failed to create handler registration\n");
         return;
     }
 
-    if (netsnmp_register_handler(reg) != MIB_REGISTERED_OK) {
-        snmp_log(LOG_ERR, "ifWifiTable: OID registration failed\n");
+    ifWifiTable_info = SNMP_MALLOC_TYPEDEF(netsnmp_table_registration_info);
+    ifWifiTable_iinfo = SNMP_MALLOC_TYPEDEF(netsnmp_iterator_info);
+
+    if (!ifWifiTable_info || !ifWifiTable_iinfo) {
+        snmp_log(LOG_ERR, "ifWifiTable: memory allocation failed\n");
+        return;
+    }
+
+    netsnmp_table_helper_add_indexes(ifWifiTable_info, ASN_INTEGER, 0);
+    ifWifiTable_info->min_column = COLUMN_IFWIFISSID;
+    ifWifiTable_info->max_column = COLUMN_IFWIFIGROUPCIPHER;
+
+    ifWifiTable_iinfo->get_first_data_point = ifWifiTable_get_first_data_point;
+    ifWifiTable_iinfo->get_next_data_point  = ifWifiTable_get_next_data_point;
+    ifWifiTable_iinfo->table_reginfo        = ifWifiTable_info;
+
+    if (netsnmp_register_table_iterator(reg, ifWifiTable_iinfo) != MIB_REGISTERED_OK) {
+        snmp_log(LOG_ERR, "ifWifiTable: iterator registration failed\n");
         return;
     }
 
